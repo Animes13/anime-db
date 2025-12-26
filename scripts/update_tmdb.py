@@ -1,38 +1,47 @@
+# -*- coding: utf-8 -*-
 import os
 import json
+import time
 import requests
 from datetime import datetime
-from time import sleep
 
-TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 BASE_URL = "https://api.themoviedb.org/3"
-
 DATA_DIR = "data"
-TV_FILE = f"{DATA_DIR}/anime_tv.json"
-MOVIE_FILE = f"{DATA_DIR}/anime_movies.json"
-META_FILE = f"{DATA_DIR}/meta.json"
+
+TMDB_TOKEN = os.environ.get("TMDB_TOKEN")
+if not TMDB_TOKEN:
+    raise RuntimeError("TMDB_TOKEN não configurado")
 
 HEADERS = {
-    "Authorization": f"Bearer {TMDB_API_KEY}",
+    "Authorization": f"Bearer {TMDB_TOKEN}",
     "Content-Type": "application/json;charset=utf-8"
 }
 
 def fetch_all(endpoint, params):
-    page = 1
     results = []
+    page = 1
     total_pages = 1
 
     while page <= total_pages:
         params["page"] = page
-        r = requests.get(f"{BASE_URL}/{endpoint}", headers=HEADERS, params=params)
+        r = requests.get(
+            f"{BASE_URL}/{endpoint}",
+            headers=HEADERS,
+            params=params,
+            timeout=20
+        )
         r.raise_for_status()
+
         data = r.json()
-
         total_pages = data.get("total_pages", 1)
-        results.extend(data.get("results", []))
 
+        print(f"📄 {endpoint} página {page}/{total_pages}")
+
+        results.extend(data.get("results", []))
         page += 1
-        sleep(0.25)  # evita rate limit
+
+        # rate limit seguro
+        time.sleep(0.25)
 
     return {
         "page": 1,
@@ -42,15 +51,11 @@ def fetch_all(endpoint, params):
     }
 
 def save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 def main():
-    if not TMDB_API_KEY:
-        raise RuntimeError("TMDB_API_KEY não configurada")
-
-    os.makedirs(DATA_DIR, exist_ok=True)
-
     print("🔄 Buscando animes (TV)...")
     anime_tv = fetch_all(
         "discover/tv",
@@ -61,7 +66,7 @@ def main():
         }
     )
 
-    print("🔄 Buscando animes (Movies)...")
+    print("🎬 Buscando filmes de anime...")
     anime_movies = fetch_all(
         "discover/movie",
         {
@@ -71,8 +76,8 @@ def main():
         }
     )
 
-    save_json(TV_FILE, anime_tv)
-    save_json(MOVIE_FILE, anime_movies)
+    save_json(f"{DATA_DIR}/anime_tv.json", anime_tv)
+    save_json(f"{DATA_DIR}/anime_movies.json", anime_movies)
 
     meta = {
         "source": "TMDB",
@@ -81,10 +86,9 @@ def main():
         "movie_count": anime_movies["total_results"]
     }
 
-    save_json(META_FILE, meta)
+    save_json(f"{DATA_DIR}/meta.json", meta)
 
-    print("✅ Atualização concluída")
-    print(meta)
+    print("✅ Atualização finalizada com sucesso")
 
 if __name__ == "__main__":
     main()
