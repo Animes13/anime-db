@@ -19,24 +19,44 @@ MAX_TMDB_ENRICH = 3000      # 🔥 limite total (ajuste se quiser)
 SLEEP_TIME = 0.15           # delay seguro para GitHub Actions
 MIN_YEAR = 2000             # ignora animes muito antigos
 
-def search_tmdb(title, media_type):
-    url = f"{TMDB_API}/search/{media_type}"
-    params = {
-        "query": title,
-        "language": "pt-BR",
-        "include_adult": "false"
-    }
+def search_tmdb(item, media_type):
+    titles = [
+        item["titles"].get("english"),
+        item["titles"].get("romaji"),
+        *item.get("synonyms", [])
+    ]
 
-    try:
-        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+    titles = [t for t in titles if t]
+
+    for title in titles:
+        r = requests.get(
+            f"{TMDB_API}/search/{media_type}",
+            headers=HEADERS,
+            params={"query": title},
+            timeout=15
+        )
+
         if r.status_code != 200:
-            return None
+            continue
 
-        results = r.json().get("results", [])
-        return results[0] if results else None
+        for result in r.json().get("results", []):
+            # 🎯 validações fortes
+            if result.get("original_language") != "ja":
+                continue
 
-    except requests.RequestException:
-        return None
+            year = (
+                result.get("release_date", "")[:4]
+                if media_type == "movie"
+                else result.get("first_air_date", "")[:4]
+            )
+
+            if item["year"] and year:
+                if abs(int(year) - int(item["year"])) > 1:
+                    continue
+
+            return result
+
+    return None
 
 
 def enrich(items):
