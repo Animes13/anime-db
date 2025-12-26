@@ -2,116 +2,119 @@ import os
 import requests
 import json
 import time
-import re
 
 TMDB_API = "https://api.themoviedb.org/3"
 TOKEN = os.getenv("TMDB_TOKEN")
 
 if not TOKEN:
-    raise RuntimeError("❌ TMDB_TOKEN não definido nos Secrets")
+    raise RuntimeError("❌ TMDB_TOKEN não definido")
 
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Content-Type": "application/json;charset=utf-8"
 }
 
-# 🔧 CONFIGURAÇÕES FINAIS
-MAX_TMDB_ENRICH = 1800
 SLEEP_TIME = 0.25
-MIN_YEAR = 1980
+MIN_YEAR = 1970
 
-used_tmdb_ids = set()
+# 🧱 tmdb padrão (TODOS TERÃO)
+TMDB_EMPTY = {
+    "id": None,
+    "media_type": None,
+    "poster": None,
+    "backdrop": None,
+    "overview": None,
+    "vote_average": None,
+    "release_date": None,
+    "checked": False
+}
 
-def normalize_title(title: str) -> str:
-    title = title.lower()
-    title = re.sub(r"[^\w\s]", "", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
 
-def search_tmdb(item):
+def get_titles(item):
     titles = [
         item.get("titles", {}).get("english"),
         item.get("titles", {}).get("romaji"),
+        item.get("titles", {}).get("native"),
         *item.get("synonyms", [])
     ]
+    return list(dict.fromkeys(t for t in titles if t))
 
-    titles = [normalize_title(t) for t in titles if t]
 
-    for title in titles:
+def search_tmdb(item):
+    fmt = item.get("format")
+    is_movie = fmt == "MOVIE"
+    endpoint = "movie" if is_movie else "tv"
+
+    for title in get_titles(item):
         r = requests.get(
-            f"{TMDB_API}/search/movie",
+            f"{TMDB_API}/search/{endpoint}",
             headers=HEADERS,
             params={"query": title},
-            timeout=15
+            timeout=10
         )
 
         if r.status_code != 200:
             continue
 
         for result in r.json().get("results", []):
-            tmdb_id = result.get("id")
-            if not tmdb_id or tmdb_id in used_tmdb_ids:
-                continue
-
-            # 🎯 idioma
             if result.get("original_language") != "ja":
                 continue
 
-            # 🎯 ano
-            year = result.get("release_date", "")[:4]
-            if item.get("year") and year:
-                if abs(int(year) - int(item["year"])) > 1:
+            date_field = "release_date" if is_movie else "first_air_date"
+            year_tmdb = result.get(date_field, "")[:4]
+
+            if item.get("year") and year_tmdb:
+                if abs(int(year_tmdb) - int(item["year"])) > 1:
                     continue
 
-            return result
+            return {
+                "id": result.get("id"),
+                "media_type": endpoint,
+                "poster": result.get("poster_path"),
+                "backdrop": result.get("backdrop_path"),
+                "overview": result.get("overview"),
+                "vote_average": result.get("vote_average"),
+                "release_date": result.get(date_field),
+                "checked": True
+            }
 
     return None
 
+
 def enrich(items):
-    enriched = 0
-
     for item in items:
-        if enriched >= MAX_TMDB_ENRICH:
-            break
+        # ✅ garante tmdb para todos
+        if "tmdb" not in item:
+            item["tmdb"] = TMDB_EMPTY.copy()
 
-        # 🎯 apenas filmes
-        if item.get("format") != "MOVIE":
+        # 🔥 já testado
+        if item["tmdb"].get("checked"):
             continue
 
-        # 🎯 já enriquecido
-        if item.get("tmdb", {}).get("id"):
+        # 🎯 apenas formatos úteis
+        if item.get("format") not in ("MOVIE", "TV"):
+            item["tmdb"]["checked"] = True
             continue
 
+        # ⛔ ano inválido
         year = item.get("year")
         if not year or year < MIN_YEAR:
+            item["tmdb"]["checked"] = True
             continue
 
         tmdb = search_tmdb(item)
 
         if tmdb:
-            tmdb_id = tmdb["id"]
-            used_tmdb_ids.add(tmdb_id)
+            item["tmdb"] = tmdb
+        else:
+            item["tmdb"]["checked"] = True
 
-            item["tmdb"] = {
-                "id": tmdb_id,
-                "poster": tmdb.get("poster_path"),
-                "backdrop": tmdb.get("backdrop_path"),
-                "overview": tmdb.get("overview"),
-                "vote_average": tmdb.get("vote_average"),
-                "release_date": tmdb.get("release_date")
-            }
-
-            enriched += 1
-
+        # 💤 SEMPRE após request
         time.sleep(SLEEP_TIME)
 
-    # 🧹 limpeza final
-    for item in items:
-        if not item.get("tmdb"):
-            item.pop("tmdb", None)
-
-    print(f"🎬 TMDB enriquecidos (filmes): {enriched}")
+    print("🎬 TMDB enrichment finalizado — sem limites artificiais")
     return items
+
 
 if __name__ == "__main__":
     with open("data/anilist_raw.json", encoding="utf-8") as f:
@@ -122,4 +125,4 @@ if __name__ == "__main__":
     with open("data/anilist_enriched.json", "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
-    print("✅ TMDB enrichment concluído")
+    print("✅ Concluído — enriquecido até onde o TMDB permitiu")
