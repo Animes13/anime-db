@@ -1,4 +1,3 @@
-# scripts/enrich_tmdb.py
 import os
 import requests
 import json
@@ -7,41 +6,82 @@ import time
 TMDB_API = "https://api.themoviedb.org/3"
 TOKEN = os.getenv("TMDB_TOKEN")
 
+if not TOKEN:
+    raise RuntimeError("❌ TMDB_TOKEN não definido nos Secrets")
+
 HEADERS = {
     "Authorization": f"Bearer {TOKEN}",
     "Content-Type": "application/json;charset=utf-8"
 }
 
+# 🔧 CONFIGURAÇÕES IMPORTANTES
+MAX_TMDB_ENRICH = 3000      # 🔥 limite total (ajuste se quiser)
+SLEEP_TIME = 0.15           # delay seguro para GitHub Actions
+MIN_YEAR = 2000             # ignora animes muito antigos
+
 def search_tmdb(title, media_type):
     url = f"{TMDB_API}/search/{media_type}"
-    params = {"query": title, "language": "pt-BR"}
-    r = requests.get(url, headers=HEADERS, params=params, timeout=15)
-    if r.status_code != 200:
+    params = {
+        "query": title,
+        "language": "pt-BR",
+        "include_adult": "false"
+    }
+
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=15)
+        if r.status_code != 200:
+            return None
+
+        results = r.json().get("results", [])
+        return results[0] if results else None
+
+    except requests.RequestException:
         return None
-    data = r.json().get("results")
-    return data[0] if data else None
+
 
 def enrich(items):
+    enriched = 0
+
     for item in items:
+        if enriched >= MAX_TMDB_ENRICH:
+            break
+
+        # 🎯 só TV e MOVIE
+        if item.get("format") not in ("TV", "MOVIE"):
+            continue
+
+        # 🎯 ignora muito antigos
+        year = item.get("year")
+        if not year or year < MIN_YEAR:
+            continue
+
         title = (
-            item["titles"].get("english")
-            or item["titles"].get("romaji")
+            item.get("titles", {}).get("english")
+            or item.get("titles", {}).get("romaji")
         )
+
+        if not title:
+            continue
 
         media_type = "movie" if item["format"] == "MOVIE" else "tv"
         tmdb = search_tmdb(title, media_type)
 
         if tmdb:
             item["tmdb"] = {
-                "id": tmdb["id"],
+                "id": tmdb.get("id"),
                 "poster": tmdb.get("poster_path"),
                 "backdrop": tmdb.get("backdrop_path"),
-                "overview": tmdb.get("overview")
+                "overview": tmdb.get("overview"),
+                "vote_average": tmdb.get("vote_average"),
+                "release_date": tmdb.get("release_date") or tmdb.get("first_air_date")
             }
+            enriched += 1
 
-        time.sleep(0.25)
+        time.sleep(SLEEP_TIME)
 
+    print(f"🎬 TMDB enriquecidos: {enriched}")
     return items
+
 
 if __name__ == "__main__":
     with open("data/anilist_raw.json", encoding="utf-8") as f:
