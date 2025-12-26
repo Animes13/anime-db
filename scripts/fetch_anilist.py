@@ -5,9 +5,15 @@ import time
 
 ANILIST_API = "https://graphql.anilist.co"
 
+HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "anime-db-github-action"
+}
+
 QUERY = """
 query ($page: Int) {
-  Page(page: $page, perPage: 50) {
+  Page(page: $page, perPage: 25) {
     pageInfo {
       hasNextPage
     }
@@ -29,19 +35,39 @@ query ($page: Int) {
 }
 """
 
+def safe_request(payload, retries=5):
+    for attempt in range(retries):
+        r = requests.post(
+            ANILIST_API,
+            headers=HEADERS,
+            json=payload,
+            timeout=30
+        )
+
+        if r.status_code == 200:
+            return r.json()
+
+        if r.status_code == 429:
+            wait = (attempt + 1) * 10
+            print(f"⏳ Rate limit (429). Aguardando {wait}s...")
+            time.sleep(wait)
+            continue
+
+        r.raise_for_status()
+
+    raise RuntimeError("❌ AniList rate limit persistente")
+
 def fetch_all_anime():
     page = 1
     all_items = []
 
     while True:
         print(f"📡 AniList page {page}")
-        r = requests.post(
-            ANILIST_API,
-            json={"query": QUERY, "variables": {"page": page}},
-            timeout=20
-        )
-        r.raise_for_status()
-        data = r.json()["data"]["Page"]
+
+        data = safe_request({
+            "query": QUERY,
+            "variables": {"page": page}
+        })["data"]["Page"]
 
         for m in data["media"]:
             all_items.append({
@@ -60,13 +86,14 @@ def fetch_all_anime():
             break
 
         page += 1
-        time.sleep(0.6)
+        time.sleep(1.2)  # 🔥 delay seguro para GitHub Actions
 
     return all_items
 
 if __name__ == "__main__":
     items = fetch_all_anime()
+
     with open("data/anilist_raw.json", "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
-    print(f"✅ Total animes: {len(items)}")
+    print(f"✅ Total de animes coletados: {len(items)}")
