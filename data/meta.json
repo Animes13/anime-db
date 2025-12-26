@@ -1,6 +1,7 @@
 {
-  "source": "TMDB",
-  "last_update": "2025-12-26T05:29:16.354468Z",
-  "tv_count": 5197,
-  "movie_count": 5759
+  "source": "AniList + TMDB",
+  "last_update": "2025-12-26T17:25:26.278151Z",
+  "total": 8839,
+  "tv_count": 4854,
+  "movie_count": 3985
 }
