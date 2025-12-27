@@ -8,7 +8,7 @@ import unicodedata
 import requests
 import threading
 from itertools import cycle
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 # ==================================================
 # CONFIG TMDB
@@ -146,6 +146,11 @@ def get_titles(item):
     ]
     return list(dict.fromkeys(t for t in titles if t))
 
+def safe_first(value):
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
+
 # ==================================================
 # TMDB HELPERS
 # ==================================================
@@ -172,12 +177,15 @@ def match_season(tv_id, wanted):
     )
     if r.status_code != 200:
         return None
+
     for s in r.json().get("seasons", []):
         if s.get("season_number") == wanted:
             return wanted
+
     for s in r.json().get("seasons", []):
         if s.get("season_number") == 0:
             return 0
+
     return None
 
 def build_tmdb(result, media, season=None):
@@ -215,17 +223,17 @@ def fetch_tmdb_details(tmdb):
 
 def classify_tmdb_type(tmdb):
     media = tmdb.get("media_type")
-    runtime = tmdb.get("runtime")
-    ep_time = tmdb.get("episode_run_time")
-    eps = tmdb.get("number_of_episodes")
+    runtime = tmdb.get("runtime") or 0
+    ep_time = tmdb.get("episode_run_time") or 0
+    eps = tmdb.get("number_of_episodes") or 0
 
     if media == "movie":
-        return "MUSIC" if runtime and runtime < 15 else "MOVIE"
+        return "MUSIC" if runtime < 15 else "MOVIE"
 
     if media == "tv":
-        if eps and eps <= 6:
+        if eps <= 6:
             return "OVA/ONA"
-        if ep_time and ep_time < 10:
+        if ep_time < 10:
             return "TV_SHORT"
         return "TV"
 
@@ -238,15 +246,17 @@ def classify_tmdb_type(tmdb):
 def search_tmdb(item):
     for title in get_titles(item):
         norm = normalize_title(title)
-        for query in (norm["raw"], norm["soft"]):
 
+        for query in (norm["raw"], norm["soft"]):
             for r in search_endpoint("tv", query):
                 year = (r.get("first_air_date") or "")[:4]
                 if not year_ok(item.get("year"), year):
                     continue
+
                 season = match_season(r["id"], norm["season"]) if norm["season"] else None
                 if norm["season"] and season is None:
                     continue
+
                 return build_tmdb(r, "tv", season)
 
             for r in search_endpoint("movie", query):
@@ -271,14 +281,12 @@ def enrich_one(item, total):
 
         if result:
             details = fetch_tmdb_details(result)
+
             result["runtime"] = details.get("runtime")
-            result["episode_run_time"] = (
-                details.get("episode_run_time", [None])[0]
-                if isinstance(details.get("episode_run_time"), list)
-                else details.get("episode_run_time")
-            )
+            result["episode_run_time"] = safe_first(details.get("episode_run_time"))
             result["number_of_episodes"] = details.get("number_of_episodes")
             result["tipo_final"] = classify_tmdb_type(result)
+
             item["tmdb"] = result
             with progress_lock:
                 progress_found += 1
