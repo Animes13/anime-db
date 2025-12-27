@@ -29,18 +29,19 @@ if len(TOKENS) < 4:
 
 token_cycle = cycle(TOKENS)
 
-def make_headers():
+def headers():
     return {
         "Authorization": f"Bearer {next(token_cycle)}",
         "Content-Type": "application/json;charset=utf-8"
     }
 
 # ==================================================
-# CONFIG
+# CONFIGURAÇÕES
 # ==================================================
 
 MAX_WORKERS = 4
 SLEEP_TIME = 0.12
+YEAR_TOLERANCE = 6
 
 TMDB_EMPTY = {
     "id": None,
@@ -59,33 +60,23 @@ TMDB_EMPTY = {
     "reason": None
 }
 
-DETAILS_CACHE = {}
-
 # ==================================================
 # PROGRESSO
 # ==================================================
 
-progress_lock = threading.Lock()
-progress_done = 0
-progress_updated = 0
-progress_skipped = 0
-start_time = time.time()
+lock = threading.Lock()
+done = found = not_found = 0
+start = time.time()
 
 def log_progress(total):
-    elapsed = time.time() - start_time
-    speed = progress_done / elapsed if elapsed else 0
-    remaining = total - progress_done
-    eta = remaining / speed if speed else 0
-
-    def fmt(s):
-        return f"{int(s//3600):02}:{int(s%3600//60):02}:{int(s%60):02}"
-
-    percent = (progress_done / total) * 100 if total else 0
+    elapsed = time.time() - start
+    speed = done / elapsed if elapsed else 0
+    eta = (total - done) / speed if speed else 0
 
     print(
-        f"[ {progress_done:5}/{total} | {percent:5.1f}% ] "
-        f"🔄 {progress_updated} ⏭ {progress_skipped} | "
-        f"{speed:4.2f} it/s | ETA {fmt(eta)}",
+        f"[{done}/{total}] "
+        f"✅ {found} ❌ {not_found} "
+        f"{speed:.2f} it/s ETA {int(eta//60)}m",
         end="\r",
         flush=True
     )
@@ -94,29 +85,20 @@ def log_progress(total):
 # NORMALIZAÇÃO
 # ==================================================
 
-ROMAN = {
-    " i ": " 1 ",
-    " ii ": " 2 ",
-    " iii ": " 3 ",
-    " iv ": " 4 ",
-    " v ": " 5 ",
-    " vi ": " 6 ",
-}
+def clean(txt):
+    txt = unicodedata.normalize("NFKD", txt.lower())
+    txt = "".join(c for c in txt if not unicodedata.combining(c))
+    txt = re.sub(r"[^a-z0-9 ]+", " ", txt)
+    return re.sub(r"\s+", " ", txt).strip()
 
-def clean_text(txt):
-    t = txt.lower()
-    for k, v in ROMAN.items():
-        t = f" {t} ".replace(k, v)
-    t = unicodedata.normalize("NFKD", t)
-    t = "".join(c for c in t if not unicodedata.combining(c))
-    t = re.sub(r"[^a-z0-9 ]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-def normalize_title(title):
-    return clean_text(title)
-
-def safe_first(v):
-    return v[0] if isinstance(v, list) and v else None
+def get_titles(item):
+    titles = [
+        item.get("titles", {}).get("english"),
+        item.get("titles", {}).get("romaji"),
+        item.get("titles", {}).get("native"),
+        *item.get("synonyms", [])
+    ]
+    return [t for t in dict.fromkeys(titles) if t]
 
 # ==================================================
 # TMDB
@@ -125,149 +107,82 @@ def safe_first(v):
 def search(endpoint, query):
     r = requests.get(
         f"{TMDB_API}/search/{endpoint}",
-        headers=make_headers(),
+        headers=headers(),
         params={"query": query},
         timeout=10
     )
     return r.json().get("results", []) if r.status_code == 200 else []
 
-def fetch_details(media, tmdb_id):
-    key = f"{media}:{tmdb_id}"
-    if key in DETAILS_CACHE:
-        return DETAILS_CACHE[key]
+def classify(tmdb):
+    if tmdb["media_type"] == "movie":
+        return "MUSIC" if (tmdb.get("runtime") or 0) < 15 else "MOVIE"
 
-    r = requests.get(
-        f"{TMDB_API}/{media}/{tmdb_id}",
-        headers=make_headers(),
-        params={"language": "pt-BR"},
-        timeout=10
-    )
-
-    DETAILS_CACHE[key] = r.json() if r.status_code == 200 else {}
-    return DETAILS_CACHE[key]
-
-def classify_tmdb_type(tmdb):
-    media = tmdb.get("media_type")
-    runtime = tmdb.get("runtime") or 0
-    ep_time = tmdb.get("episode_run_time") or 0
-    eps = tmdb.get("number_of_episodes") or 0
-
-    if media == "movie":
-        return "MUSIC" if runtime and runtime < 15 else "MOVIE"
-
-    if media == "tv":
-        if eps and eps <= 6:
+    if tmdb["media_type"] == "tv":
+        if (tmdb.get("number_of_episodes") or 0) <= 6:
             return "OVA/ONA"
-        if ep_time and ep_time < 10:
+        if (tmdb.get("episode_run_time") or 0) < 10:
             return "TV_SHORT"
         return "TV"
 
-    return "UNCLASSIFIED"
-
-# ==================================================
-# CRITÉRIO DE REPROCESSAMENTO
-# ==================================================
-
-def needs_tmdb_update(tmdb):
-    return (
-        not tmdb.get("id")
-        or not tmdb.get("overview")
-        or not tmdb.get("poster")
-        or not tmdb.get("backdrop")
-    )
-
-# ==================================================
-# ENRICH
-# ==================================================
+    return "UNKNOWN"
 
 def enrich_one(item, total):
-    global progress_done, progress_updated, progress_skipped
+    global done, found, not_found
 
-    item.setdefault("tmdb", TMDB_EMPTY.copy())
+    if "tmdb" not in item:
+        item["tmdb"] = TMDB_EMPTY.copy()
 
-    if not needs_tmdb_update(item["tmdb"]):
-        with progress_lock:
-            progress_done += 1
-            progress_skipped += 1
-            log_progress(total)
-        return item
+    if not item["tmdb"]["checked"]:
+        for title in get_titles(item):
+            query = clean(title)
 
-    titles = [
-        item.get("titles", {}).get("english"),
-        item.get("titles", {}).get("romaji"),
-        item.get("titles", {}).get("native"),
-        *item.get("synonyms", [])
-    ]
+            for r in search("tv", query):
+                item["tmdb"].update({
+                    "id": r["id"],
+                    "media_type": "tv",
+                    "checked": True
+                })
+                found += 1
+                break
 
-    found = None
+            if item["tmdb"]["id"]:
+                break
 
-    for t in filter(None, titles):
-        query = normalize_title(t)
+            for r in search("movie", query):
+                item["tmdb"].update({
+                    "id": r["id"],
+                    "media_type": "movie",
+                    "checked": True
+                })
+                found += 1
+                break
 
-        for r in search("tv", query):
-            found = r | {"media_type": "tv"}
-            break
-        if found:
-            break
+        if not item["tmdb"]["id"]:
+            item["tmdb"]["checked"] = True
+            item["tmdb"]["reason"] = "not_found"
+            not_found += 1
 
-        for r in search("movie", query):
-            found = r | {"media_type": "movie"}
-            break
-        if found:
-            break
-
-    if found:
-        details = fetch_details(found["media_type"], found["id"])
-        item["tmdb"].update({
-            "id": found["id"],
-            "media_type": found["media_type"],
-            "poster": found.get("poster_path"),
-            "backdrop": found.get("backdrop_path"),
-            "overview": details.get("overview"),
-            "vote_average": found.get("vote_average"),
-            "release_date": found.get("first_air_date") or found.get("release_date"),
-            "runtime": details.get("runtime"),
-            "episode_run_time": safe_first(details.get("episode_run_time")),
-            "number_of_episodes": details.get("number_of_episodes"),
-            "checked": True,
-            "reason": None
-        })
-        item["tmdb"]["tipo_final"] = classify_tmdb_type(item["tmdb"])
-
-        with progress_lock:
-            progress_updated += 1
-    else:
-        item["tmdb"]["checked"] = True
-        item["tmdb"]["reason"] = "not_found"
-
-    with progress_lock:
-        progress_done += 1
+    with lock:
+        done += 1
         log_progress(total)
 
     time.sleep(SLEEP_TIME)
     return item
-
-def enrich_all(data):
-    total = len(data)
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        return list(ex.map(lambda i: enrich_one(i, total), data))
 
 # ==================================================
 # MAIN
 # ==================================================
 
 if __name__ == "__main__":
-    PATH = "data/anilist_enriched.json"
-
-    with open(PATH, "r", encoding="utf-8") as f:
+    with open("anilist_raw.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    print(f"📦 Itens carregados: {len(data)}")
+    total = len(data)
+    print(f"📦 Processando {total} animes")
 
-    enriched = enrich_all(data)
-    print()
+    with ThreadPoolExecutor(MAX_WORKERS) as ex:
+        data = list(ex.map(lambda i: enrich_one(i, total), data))
 
-    with open(PATH, "w", encoding="utf-8") as f:
-        json.dump(enriched, f, ensure_ascii=False, indent=2)
-
-    print("✅ Atualização incremental concluída")
+    print("\n💾 Salvando anilist_enriched.json")
+    with open("anilist_enriched.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
