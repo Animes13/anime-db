@@ -6,6 +6,7 @@ import json
 import time
 import unicodedata
 import requests
+import threading
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -62,6 +63,38 @@ TMDB_EMPTY = {
 DETAILS_CACHE = {}
 
 # ==================================================
+# PROGRESSO (THREAD SAFE)
+# ==================================================
+
+progress_lock = threading.Lock()
+progress_done = 0
+progress_found = 0
+progress_not_found = 0
+start_time = time.time()
+
+def log_progress(total):
+    elapsed = time.time() - start_time
+    speed = progress_done / elapsed if elapsed > 0 else 0
+    remaining = total - progress_done
+    eta = remaining / speed if speed > 0 else 0
+
+    def fmt(sec):
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        return f"{h:02}:{m:02}:{s:02}"
+
+    percent = (progress_done / total) * 100 if total else 0
+
+    print(
+        f"[ {progress_done:5}/{total} | {percent:5.1f}% ] "
+        f"✅ {progress_found} ❌ {progress_not_found} | "
+        f"{speed:4.2f} it/s | ETA {fmt(eta)}",
+        end="\r",
+        flush=True
+    )
+
+# ==================================================
 # NORMALIZAÇÃO
 # ==================================================
 
@@ -74,22 +107,17 @@ ROMAN = {
     " vi ": " 6 ",
 }
 
-SOFT_STOPWORDS = [
-    r"\b(tv|the animation|anime)\b",
-]
-
+SOFT_STOPWORDS = [r"\b(tv|the animation|anime)\b"]
 SEASON_RE = re.compile(r"(season|stage|part|cour)\s*(\d+)", re.I)
 
 def clean_text(txt: str):
     t = txt.lower()
     for k, v in ROMAN.items():
         t = f" {t} ".replace(k, v)
-
     t = unicodedata.normalize("NFKD", t)
     t = "".join(c for c in t if not unicodedata.combining(c))
     t = re.sub(r"[^a-z0-9 ]+", " ", t)
-    t = re.sub(r"\s+", " ", t).strip()
-    return t
+    return re.sub(r"\s+", " ", t).strip()
 
 def normalize_title(title: str):
     season = None
@@ -98,17 +126,12 @@ def normalize_title(title: str):
         season = int(m.group(2))
 
     raw = clean_text(title)
-
     soft = raw
     for sw in SOFT_STOPWORDS:
         soft = re.sub(sw, " ", soft)
     soft = re.sub(r"\s+", " ", soft).strip()
 
-    return {
-        "raw": raw,
-        "soft": soft,
-        "season": season
-    }
+    return {"raw": raw, "soft": soft, "season": season}
 
 # ==================================================
 # UTIL
@@ -134,9 +157,7 @@ def search_endpoint(endpoint, query):
         params={"query": query},
         timeout=10
     )
-    if r.status_code != 200:
-        return []
-    return r.json().get("results", [])
+    return r.json().get("results", []) if r.status_code == 200 else []
 
 def year_ok(item_year, tmdb_year):
     if not item_year or not tmdb_year:
@@ -151,12 +172,10 @@ def match_season(tv_id, wanted):
     )
     if r.status_code != 200:
         return None
-
-    seasons = r.json().get("seasons", [])
-    for s in seasons:
+    for s in r.json().get("seasons", []):
         if s.get("season_number") == wanted:
             return wanted
-    for s in seasons:
+    for s in r.json().get("seasons", []):
         if s.get("season_number") == 0:
             return 0
     return None
@@ -177,25 +196,17 @@ def build_tmdb(result, media, season=None):
     }
 
 def fetch_tmdb_details(tmdb):
-    media = tmdb.get("media_type")
-    tmdb_id = tmdb.get("id")
-    if not media or not tmdb_id:
-        return {}
-
-    key = f"{media}:{tmdb_id}"
+    key = f"{tmdb['media_type']}:{tmdb['id']}"
     if key in DETAILS_CACHE:
         return DETAILS_CACHE[key]
 
     r = requests.get(
-        f"{TMDB_API}/{media}/{tmdb_id}",
+        f"{TMDB_API}/{tmdb['media_type']}/{tmdb['id']}",
         headers=make_headers(),
         timeout=10
     )
-    if r.status_code != 200:
-        DETAILS_CACHE[key] = {}
-        return {}
 
-    DETAILS_CACHE[key] = r.json()
+    DETAILS_CACHE[key] = r.json() if r.status_code == 200 else {}
     return DETAILS_CACHE[key]
 
 # ==================================================
@@ -209,9 +220,7 @@ def classify_tmdb_type(tmdb):
     eps = tmdb.get("number_of_episodes")
 
     if media == "movie":
-        if runtime and runtime < 15:
-            return "MUSIC"
-        return "MOVIE"
+        return "MUSIC" if runtime and runtime < 15 else "MOVIE"
 
     if media == "tv":
         if eps and eps <= 6:
@@ -235,31 +244,15 @@ def search_tmdb(item):
                 year = (r.get("first_air_date") or "")[:4]
                 if not year_ok(item.get("year"), year):
                     continue
-                season = None
-                if norm["season"] is not None:
-                    season = match_season(r["id"], norm["season"])
-                    if season is None:
-                        continue
+                season = match_season(r["id"], norm["season"]) if norm["season"] else None
+                if norm["season"] and season is None:
+                    continue
                 return build_tmdb(r, "tv", season)
 
             for r in search_endpoint("movie", query):
                 year = (r.get("release_date") or "")[:4]
-                if not year_ok(item.get("year"), year):
-                    continue
-                return build_tmdb(r, "movie")
-
-            for r in search_endpoint("multi", query):
-                media = r.get("media_type")
-                if media not in ("tv", "movie"):
-                    continue
-                year = (
-                    (r.get("first_air_date") or "")[:4]
-                    if media == "tv"
-                    else (r.get("release_date") or "")[:4]
-                )
-                if not year_ok(item.get("year"), year):
-                    continue
-                return build_tmdb(r, media)
+                if year_ok(item.get("year"), year):
+                    return build_tmdb(r, "movie")
 
     return None
 
@@ -267,52 +260,44 @@ def search_tmdb(item):
 # ENRICH
 # ==================================================
 
-def enrich_one(idx, item, total):
+def enrich_one(item, total):
+    global progress_done, progress_found, progress_not_found
+
     if "tmdb" not in item:
         item["tmdb"] = TMDB_EMPTY.copy()
 
-    if item["tmdb"].get("checked"):
-        return item
+    if not item["tmdb"].get("checked"):
+        result = search_tmdb(item)
 
-    result = search_tmdb(item)
+        if result:
+            details = fetch_tmdb_details(result)
+            result["runtime"] = details.get("runtime")
+            result["episode_run_time"] = (
+                details.get("episode_run_time", [None])[0]
+                if isinstance(details.get("episode_run_time"), list)
+                else details.get("episode_run_time")
+            )
+            result["number_of_episodes"] = details.get("number_of_episodes")
+            result["tipo_final"] = classify_tmdb_type(result)
+            item["tmdb"] = result
+            with progress_lock:
+                progress_found += 1
+        else:
+            item["tmdb"].update({"checked": True, "reason": "not_found"})
+            with progress_lock:
+                progress_not_found += 1
 
-    if result:
-        details = fetch_tmdb_details(result)
-
-        result["runtime"] = details.get("runtime")
-        result["episode_run_time"] = (
-            details.get("episode_run_time", [None])[0]
-            if isinstance(details.get("episode_run_time"), list)
-            else details.get("episode_run_time")
-        )
-        result["number_of_episodes"] = details.get("number_of_episodes")
-        result["tipo_final"] = classify_tmdb_type(result)
-
-        item["tmdb"] = result
-        print(f"[{idx}/{total}] ✅ TMDB ({result['tipo_final']})")
-    else:
-        item["tmdb"].update({
-            "checked": True,
-            "reason": "not_found"
-        })
-        print(f"[{idx}/{total}] ❌ Sem TMDB")
+    with progress_lock:
+        progress_done += 1
+        log_progress(total)
 
     time.sleep(SLEEP_TIME)
     return item
 
 def enrich_all(data):
     total = len(data)
-    results = [None] * total
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {
-            executor.submit(enrich_one, i + 1, data[i], total): i
-            for i in range(total)
-        }
-        for f in as_completed(futures):
-            results[futures[f]] = f.result()
-
-    return results
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        return list(ex.map(lambda i: enrich_one(i, total), data))
 
 # ==================================================
 # MAIN
@@ -329,8 +314,9 @@ if __name__ == "__main__":
 
     enriched = enrich_all(data)
 
+    print()  # quebra de linha após progresso
+
     with open(OUTPUT, "w", encoding="utf-8") as f:
         json.dump(enriched, f, ensure_ascii=False, indent=2)
 
-    found = sum(1 for i in enriched if i["tmdb"].get("id"))
-    print(f"✅ TMDB encontrados: {found}")
+    print(f"✅ TMDB encontrados: {sum(1 for i in enriched if i['tmdb'].get('id'))}")
