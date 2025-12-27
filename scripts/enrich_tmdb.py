@@ -228,7 +228,7 @@ def enrich_all(data):
 # ==================================================
 
 if __name__ == "__main__":
-    INPUT = "data/anilist.json"
+    INPUT = "data/anilist_raw.json"
     OUTPUT = "data/anilist_enriched.json"
 
     with open(INPUT, "r", encoding="utf-8") as f:
