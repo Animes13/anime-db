@@ -7,7 +7,7 @@ import time
 import unicodedata
 import requests
 from itertools import cycle
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================================================
 # CONFIG TMDB
@@ -39,7 +39,8 @@ def make_headers():
 # ==================================================
 
 MAX_WORKERS = 4
-SLEEP_TIME = 0.15
+SLEEP_TIME = 0.12
+YEAR_TOLERANCE = 6
 
 TMDB_EMPTY = {
     "id": None,
@@ -50,11 +51,18 @@ TMDB_EMPTY = {
     "overview": None,
     "vote_average": None,
     "release_date": None,
-    "checked": False
+    "runtime": None,
+    "episode_run_time": None,
+    "number_of_episodes": None,
+    "tipo_final": None,
+    "checked": False,
+    "reason": None
 }
 
+DETAILS_CACHE = {}
+
 # ==================================================
-# NORMALIZAÇÃO DE TÍTULOS
+# NORMALIZAÇÃO
 # ==================================================
 
 ROMAN = {
@@ -66,45 +74,39 @@ ROMAN = {
     " vi ": " 6 ",
 }
 
-STOPWORDS = [
-    r"\b(first|second|third|fourth|final)\b",
-    r"\b(stage|part|season|cour)\b",
-    r"\b(ova|ona|special|episode|ep)\b",
+SOFT_STOPWORDS = [
     r"\b(tv|the animation|anime)\b",
 ]
 
-def normalize_title(title: str):
-    original = title.lower()
+SEASON_RE = re.compile(r"(season|stage|part|cour)\s*(\d+)", re.I)
 
-    season = None
-    m = re.search(r"(season|stage|part)\s*(\d+)", original)
-    if m:
-        season = int(m.group(2))
-
-    t = f" {original} "
+def clean_text(txt: str):
+    t = txt.lower()
     for k, v in ROMAN.items():
-        t = t.replace(k, v)
-
-    for sw in STOPWORDS:
-        t = re.sub(sw, " ", t)
+        t = f" {t} ".replace(k, v)
 
     t = unicodedata.normalize("NFKD", t)
     t = "".join(c for c in t if not unicodedata.combining(c))
     t = re.sub(r"[^a-z0-9 ]+", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
+    return t
 
-    words = t.split()
-    base = " ".join(words[:6])
+def normalize_title(title: str):
+    season = None
+    m = SEASON_RE.search(title)
+    if m:
+        season = int(m.group(2))
 
-    variants = list(dict.fromkeys([
-        base,
-        " ".join(words),
-        base.replace(" ", "")
-    ]))
+    raw = clean_text(title)
+
+    soft = raw
+    for sw in SOFT_STOPWORDS:
+        soft = re.sub(sw, " ", soft)
+    soft = re.sub(r"\s+", " ", soft).strip()
 
     return {
-        "base": base,
-        "variants": variants,
+        "raw": raw,
+        "soft": soft,
         "season": season
     }
 
@@ -125,7 +127,23 @@ def get_titles(item):
 # TMDB HELPERS
 # ==================================================
 
-def match_season(tv_id, season_number):
+def search_endpoint(endpoint, query):
+    r = requests.get(
+        f"{TMDB_API}/search/{endpoint}",
+        headers=make_headers(),
+        params={"query": query},
+        timeout=10
+    )
+    if r.status_code != 200:
+        return []
+    return r.json().get("results", [])
+
+def year_ok(item_year, tmdb_year):
+    if not item_year or not tmdb_year:
+        return True
+    return abs(int(tmdb_year) - int(item_year)) <= YEAR_TOLERANCE
+
+def match_season(tv_id, wanted):
     r = requests.get(
         f"{TMDB_API}/tv/{tv_id}",
         headers=make_headers(),
@@ -134,67 +152,114 @@ def match_season(tv_id, season_number):
     if r.status_code != 200:
         return None
 
-    for season in r.json().get("seasons", []):
-        if season.get("season_number") == season_number:
-            return {
-                "id": tv_id,
-                "media_type": "tv",
-                "season": season_number,
-                "poster": season.get("poster_path"),
-                "checked": True
-            }
+    seasons = r.json().get("seasons", [])
+    for s in seasons:
+        if s.get("season_number") == wanted:
+            return wanted
+    for s in seasons:
+        if s.get("season_number") == 0:
+            return 0
     return None
+
+def build_tmdb(result, media, season=None):
+    date_field = "release_date" if media == "movie" else "first_air_date"
+    return {
+        "id": result.get("id"),
+        "media_type": media,
+        "season": season,
+        "poster": result.get("poster_path"),
+        "backdrop": result.get("backdrop_path"),
+        "overview": result.get("overview"),
+        "vote_average": result.get("vote_average"),
+        "release_date": result.get(date_field),
+        "checked": True,
+        "reason": None
+    }
+
+def fetch_tmdb_details(tmdb):
+    media = tmdb.get("media_type")
+    tmdb_id = tmdb.get("id")
+    if not media or not tmdb_id:
+        return {}
+
+    key = f"{media}:{tmdb_id}"
+    if key in DETAILS_CACHE:
+        return DETAILS_CACHE[key]
+
+    r = requests.get(
+        f"{TMDB_API}/{media}/{tmdb_id}",
+        headers=make_headers(),
+        timeout=10
+    )
+    if r.status_code != 200:
+        DETAILS_CACHE[key] = {}
+        return {}
+
+    DETAILS_CACHE[key] = r.json()
+    return DETAILS_CACHE[key]
+
+# ==================================================
+# CLASSIFICAÇÃO
+# ==================================================
+
+def classify_tmdb_type(tmdb):
+    media = tmdb.get("media_type")
+    runtime = tmdb.get("runtime")
+    ep_time = tmdb.get("episode_run_time")
+    eps = tmdb.get("number_of_episodes")
+
+    if media == "movie":
+        if runtime and runtime < 15:
+            return "MUSIC"
+        return "MOVIE"
+
+    if media == "tv":
+        if eps and eps <= 6:
+            return "OVA/ONA"
+        if ep_time and ep_time < 10:
+            return "TV_SHORT"
+        return "TV"
+
+    return "UNCLASSIFIED"
 
 # ==================================================
 # BUSCA TMDB
 # ==================================================
 
 def search_tmdb(item):
-    for raw_title in get_titles(item):
-        norm = normalize_title(raw_title)
+    for title in get_titles(item):
+        norm = normalize_title(title)
+        for query in (norm["raw"], norm["soft"]):
 
-        for query in norm["variants"]:
-            try:
-                r = requests.get(
-                    f"{TMDB_API}/search/multi",
-                    headers=make_headers(),
-                    params={"query": query},
-                    timeout=10
-                )
-
-                if r.status_code != 200:
+            for r in search_endpoint("tv", query):
+                year = (r.get("first_air_date") or "")[:4]
+                if not year_ok(item.get("year"), year):
                     continue
-
-                for result in r.json().get("results", []):
-                    media = result.get("media_type")
-                    if media not in ("tv", "movie"):
+                season = None
+                if norm["season"] is not None:
+                    season = match_season(r["id"], norm["season"])
+                    if season is None:
                         continue
+                return build_tmdb(r, "tv", season)
 
-                    date_field = "release_date" if media == "movie" else "first_air_date"
-                    year_tmdb = (result.get(date_field) or "")[:4]
+            for r in search_endpoint("movie", query):
+                year = (r.get("release_date") or "")[:4]
+                if not year_ok(item.get("year"), year):
+                    continue
+                return build_tmdb(r, "movie")
 
-                    if item.get("year") and year_tmdb:
-                        if abs(int(year_tmdb) - int(item["year"])) > 3:
-                            continue
-
-                    if media == "tv" and norm["season"]:
-                        season_match = match_season(result["id"], norm["season"])
-                        if season_match:
-                            return season_match
-
-                    return {
-                        "id": result.get("id"),
-                        "media_type": media,
-                        "poster": result.get("poster_path"),
-                        "backdrop": result.get("backdrop_path"),
-                        "overview": result.get("overview"),
-                        "vote_average": result.get("vote_average"),
-                        "release_date": result.get(date_field),
-                        "checked": True
-                    }
-
-            except Exception:
-                continue
+            for r in search_endpoint("multi", query):
+                media = r.get("media_type")
+                if media not in ("tv", "movie"):
+                    continue
+                year = (
+                    (r.get("first_air_date") or "")[:4]
+                    if media == "tv"
+                    else (r.get("release_date") or "")[:4]
+                )
+                if not year_ok(item.get("year"), year):
+                    continue
+                return build_tmdb(r, media)
 
     return None
 
@@ -202,7 +267,7 @@ def search_tmdb(item):
 # ENRICH
 # ==================================================
 
-def enrich_one(item):
+def enrich_one(idx, item, total):
     if "tmdb" not in item:
         item["tmdb"] = TMDB_EMPTY.copy()
 
@@ -212,16 +277,42 @@ def enrich_one(item):
     result = search_tmdb(item)
 
     if result:
+        details = fetch_tmdb_details(result)
+
+        result["runtime"] = details.get("runtime")
+        result["episode_run_time"] = (
+            details.get("episode_run_time", [None])[0]
+            if isinstance(details.get("episode_run_time"), list)
+            else details.get("episode_run_time")
+        )
+        result["number_of_episodes"] = details.get("number_of_episodes")
+        result["tipo_final"] = classify_tmdb_type(result)
+
         item["tmdb"] = result
+        print(f"[{idx}/{total}] ✅ TMDB ({result['tipo_final']})")
     else:
-        item["tmdb"]["checked"] = True
+        item["tmdb"].update({
+            "checked": True,
+            "reason": "not_found"
+        })
+        print(f"[{idx}/{total}] ❌ Sem TMDB")
 
     time.sleep(SLEEP_TIME)
     return item
 
 def enrich_all(data):
+    total = len(data)
+    results = [None] * total
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        return list(executor.map(enrich_one, data))
+        futures = {
+            executor.submit(enrich_one, i + 1, data[i], total): i
+            for i in range(total)
+        }
+        for f in as_completed(futures):
+            results[futures[f]] = f.result()
+
+    return results
 
 # ==================================================
 # MAIN
