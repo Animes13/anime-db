@@ -41,7 +41,6 @@ def make_headers():
 
 MAX_WORKERS = 4
 SLEEP_TIME = 0.12
-YEAR_TOLERANCE = 6
 
 TMDB_EMPTY = {
     "id": None,
@@ -68,8 +67,8 @@ DETAILS_CACHE = {}
 
 progress_lock = threading.Lock()
 progress_done = 0
-progress_found = 0
-progress_not_found = 0
+progress_updated = 0
+progress_skipped = 0
 start_time = time.time()
 
 def log_progress(total):
@@ -85,7 +84,7 @@ def log_progress(total):
 
     print(
         f"[ {progress_done:5}/{total} | {percent:5.1f}% ] "
-        f"✅ {progress_found} ❌ {progress_not_found} | "
+        f"🔄 {progress_updated} ⏭ {progress_skipped} | "
         f"{speed:4.2f} it/s | ETA {fmt(eta)}",
         end="\r",
         flush=True
@@ -104,8 +103,6 @@ ROMAN = {
     " vi ": " 6 ",
 }
 
-SEASON_RE = re.compile(r"(season|stage|part|cour)\s*(\d+)", re.I)
-
 def clean_text(txt):
     t = txt.lower()
     for k, v in ROMAN.items():
@@ -116,19 +113,13 @@ def clean_text(txt):
     return re.sub(r"\s+", " ", t).strip()
 
 def normalize_title(title):
-    season = None
-    m = SEASON_RE.search(title)
-    if m:
-        season = int(m.group(2))
-    return clean_text(title), season
+    return clean_text(title)
 
-def safe_first(value):
-    if isinstance(value, list) and value:
-        return value[0]
-    return None
+def safe_first(v):
+    return v[0] if isinstance(v, list) and v else None
 
 # ==================================================
-# TMDB HELPERS
+# TMDB
 # ==================================================
 
 def search(endpoint, query):
@@ -148,15 +139,12 @@ def fetch_details(media, tmdb_id):
     r = requests.get(
         f"{TMDB_API}/{media}/{tmdb_id}",
         headers=make_headers(),
+        params={"language": "pt-BR"},
         timeout=10
     )
 
     DETAILS_CACHE[key] = r.json() if r.status_code == 200 else {}
     return DETAILS_CACHE[key]
-
-# ==================================================
-# CLASSIFICAÇÃO
-# ==================================================
 
 def classify_tmdb_type(tmdb):
     media = tmdb.get("media_type")
@@ -177,18 +165,30 @@ def classify_tmdb_type(tmdb):
     return "UNCLASSIFIED"
 
 # ==================================================
+# CRITÉRIO DE REPROCESSAMENTO
+# ==================================================
+
+def needs_tmdb_update(tmdb):
+    return (
+        not tmdb.get("id")
+        or not tmdb.get("overview")
+        or not tmdb.get("poster")
+        or not tmdb.get("backdrop")
+    )
+
+# ==================================================
 # ENRICH
 # ==================================================
 
 def enrich_one(item, total):
-    global progress_done, progress_found, progress_not_found
+    global progress_done, progress_updated, progress_skipped
 
     item.setdefault("tmdb", TMDB_EMPTY.copy())
 
-    # 🔥 SKIP inteligente
-    if item["tmdb"].get("checked") or item["tmdb"].get("id"):
+    if not needs_tmdb_update(item["tmdb"]):
         with progress_lock:
             progress_done += 1
+            progress_skipped += 1
             log_progress(total)
         return item
 
@@ -202,38 +202,43 @@ def enrich_one(item, total):
     found = None
 
     for t in filter(None, titles):
-        query, _ = normalize_title(t)
+        query = normalize_title(t)
 
         for r in search("tv", query):
-            found = {"id": r["id"], "media_type": "tv"}
+            found = r | {"media_type": "tv"}
             break
         if found:
             break
 
         for r in search("movie", query):
-            found = {"id": r["id"], "media_type": "movie"}
+            found = r | {"media_type": "movie"}
             break
         if found:
             break
 
     if found:
         details = fetch_details(found["media_type"], found["id"])
-        found.update({
+        item["tmdb"].update({
+            "id": found["id"],
+            "media_type": found["media_type"],
+            "poster": found.get("poster_path"),
+            "backdrop": found.get("backdrop_path"),
+            "overview": details.get("overview"),
+            "vote_average": found.get("vote_average"),
+            "release_date": found.get("first_air_date") or found.get("release_date"),
             "runtime": details.get("runtime"),
             "episode_run_time": safe_first(details.get("episode_run_time")),
             "number_of_episodes": details.get("number_of_episodes"),
             "checked": True,
             "reason": None
         })
-        found["tipo_final"] = classify_tmdb_type(found)
-        item["tmdb"] = found
+        item["tmdb"]["tipo_final"] = classify_tmdb_type(item["tmdb"])
+
         with progress_lock:
-            progress_found += 1
+            progress_updated += 1
     else:
         item["tmdb"]["checked"] = True
         item["tmdb"]["reason"] = "not_found"
-        with progress_lock:
-            progress_not_found += 1
 
     with progress_lock:
         progress_done += 1
@@ -252,10 +257,9 @@ def enrich_all(data):
 # ==================================================
 
 if __name__ == "__main__":
-    INPUT = "data/anilist_enriched.json"
-    OUTPUT = "data/anilist_enriched.json"
+    PATH = "data/anilist_enriched.json"
 
-    with open(INPUT, "r", encoding="utf-8") as f:
+    with open(PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
 
     print(f"📦 Itens carregados: {len(data)}")
@@ -263,7 +267,7 @@ if __name__ == "__main__":
     enriched = enrich_all(data)
     print()
 
-    with open(OUTPUT, "w", encoding="utf-8") as f:
+    with open(PATH, "w", encoding="utf-8") as f:
         json.dump(enriched, f, ensure_ascii=False, indent=2)
 
     print("✅ Atualização incremental concluída")
