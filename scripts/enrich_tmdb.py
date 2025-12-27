@@ -1,13 +1,20 @@
+# -*- coding: utf-8 -*-
+
 import os
-import requests
+import re
 import json
 import time
+import unicodedata
+import requests
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor
 
+# ==================================================
+# CONFIG TMDB
+# ==================================================
+
 TMDB_API = "https://api.themoviedb.org/3"
 
-# 🔑 Pool de tokens TMDB (4)
 TOKENS = [
     os.getenv("TMDB_TOKEN_1"),
     os.getenv("TMDB_TOKEN_2"),
@@ -27,15 +34,17 @@ def make_headers():
         "Content-Type": "application/json;charset=utf-8"
     }
 
-# ⚙️ CONFIGURAÇÕES SEGURAS
-MAX_WORKERS = 4        # seguro para GitHub Actions
-SLEEP_TIME = 0.15      # evita bursts
-MIN_YEAR = 1970
+# ==================================================
+# CONFIGURAÇÕES
+# ==================================================
 
-# 🧱 tmdb padrão (TODOS TERÃO)
+MAX_WORKERS = 4
+SLEEP_TIME = 0.15
+
 TMDB_EMPTY = {
     "id": None,
-    "media_type": None,   # movie | tv
+    "media_type": None,
+    "season": None,
     "poster": None,
     "backdrop": None,
     "overview": None,
@@ -44,6 +53,64 @@ TMDB_EMPTY = {
     "checked": False
 }
 
+# ==================================================
+# NORMALIZAÇÃO DE TÍTULOS
+# ==================================================
+
+ROMAN = {
+    " i ": " 1 ",
+    " ii ": " 2 ",
+    " iii ": " 3 ",
+    " iv ": " 4 ",
+    " v ": " 5 ",
+    " vi ": " 6 ",
+}
+
+STOPWORDS = [
+    r"\b(first|second|third|fourth|final)\b",
+    r"\b(stage|part|season|cour)\b",
+    r"\b(ova|ona|special|episode|ep)\b",
+    r"\b(tv|the animation|anime)\b",
+]
+
+def normalize_title(title: str):
+    original = title.lower()
+
+    season = None
+    m = re.search(r"(season|stage|part)\s*(\d+)", original)
+    if m:
+        season = int(m.group(2))
+
+    t = f" {original} "
+    for k, v in ROMAN.items():
+        t = t.replace(k, v)
+
+    for sw in STOPWORDS:
+        t = re.sub(sw, " ", t)
+
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+
+    words = t.split()
+    base = " ".join(words[:6])
+
+    variants = list(dict.fromkeys([
+        base,
+        " ".join(words),
+        base.replace(" ", "")
+    ]))
+
+    return {
+        "base": base,
+        "variants": variants,
+        "season": season
+    }
+
+# ==================================================
+# UTIL
+# ==================================================
 
 def get_titles(item):
     titles = [
@@ -52,101 +119,127 @@ def get_titles(item):
         item.get("titles", {}).get("native"),
         *item.get("synonyms", [])
     ]
-    # 🔁 deduplicação mantendo ordem
     return list(dict.fromkeys(t for t in titles if t))
 
+# ==================================================
+# TMDB HELPERS
+# ==================================================
+
+def match_season(tv_id, season_number):
+    r = requests.get(
+        f"{TMDB_API}/tv/{tv_id}",
+        headers=make_headers(),
+        timeout=10
+    )
+    if r.status_code != 200:
+        return None
+
+    for season in r.json().get("seasons", []):
+        if season.get("season_number") == season_number:
+            return {
+                "id": tv_id,
+                "media_type": "tv",
+                "season": season_number,
+                "poster": season.get("poster_path"),
+                "checked": True
+            }
+    return None
+
+# ==================================================
+# BUSCA TMDB
+# ==================================================
 
 def search_tmdb(item):
-    fmt = item.get("format")
-    is_movie = fmt == "MOVIE"
-    endpoint = "movie" if is_movie else "tv"
+    for raw_title in get_titles(item):
+        norm = normalize_title(raw_title)
 
-    for title in get_titles(item):
-        try:
-            r = requests.get(
-                f"{TMDB_API}/search/{endpoint}",
-                headers=make_headers(),
-                params={"query": title},
-                timeout=10
-            )
+        for query in norm["variants"]:
+            try:
+                r = requests.get(
+                    f"{TMDB_API}/search/multi",
+                    headers=make_headers(),
+                    params={"query": query},
+                    timeout=10
+                )
 
-            if r.status_code != 200:
-                continue
-
-            for result in r.json().get("results", []):
-                # 🎌 anime geralmente japonês
-                if result.get("original_language") != "ja":
+                if r.status_code != 200:
                     continue
 
-                date_field = "release_date" if is_movie else "first_air_date"
-                year_tmdb = result.get(date_field, "")[:4]
-
-                if item.get("year") and year_tmdb:
-                    if abs(int(year_tmdb) - int(item["year"])) > 1:
+                for result in r.json().get("results", []):
+                    media = result.get("media_type")
+                    if media not in ("tv", "movie"):
                         continue
 
-                return {
-                    "id": result.get("id"),
-                    "media_type": endpoint,
-                    "poster": result.get("poster_path"),
-                    "backdrop": result.get("backdrop_path"),
-                    "overview": result.get("overview"),
-                    "vote_average": result.get("vote_average"),
-                    "release_date": result.get(date_field),
-                    "checked": True
-                }
+                    date_field = "release_date" if media == "movie" else "first_air_date"
+                    year_tmdb = (result.get(date_field) or "")[:4]
 
-        except Exception:
-            return None
+                    if item.get("year") and year_tmdb:
+                        if abs(int(year_tmdb) - int(item["year"])) > 3:
+                            continue
+
+                    if media == "tv" and norm["season"]:
+                        season_match = match_season(result["id"], norm["season"])
+                        if season_match:
+                            return season_match
+
+                    return {
+                        "id": result.get("id"),
+                        "media_type": media,
+                        "poster": result.get("poster_path"),
+                        "backdrop": result.get("backdrop_path"),
+                        "overview": result.get("overview"),
+                        "vote_average": result.get("vote_average"),
+                        "release_date": result.get(date_field),
+                        "checked": True
+                    }
+
+            except Exception:
+                continue
 
     return None
 
+# ==================================================
+# ENRICH
+# ==================================================
 
 def enrich_one(item):
-    # ✅ garante tmdb
     if "tmdb" not in item:
         item["tmdb"] = TMDB_EMPTY.copy()
 
-    # 🔒 já testado
     if item["tmdb"].get("checked"):
         return item
 
-    # 🎯 apenas formatos úteis
-    if item.get("format") not in ("MOVIE", "TV"):
-        item["tmdb"]["checked"] = True
-        return item
+    result = search_tmdb(item)
 
-    # ⛔ ano inválido
-    year = item.get("year")
-    if not year or year < MIN_YEAR:
-        item["tmdb"]["checked"] = True
-        return item
-
-    tmdb = search_tmdb(item)
-
-    if tmdb:
-        item["tmdb"] = tmdb
+    if result:
+        item["tmdb"] = result
     else:
         item["tmdb"]["checked"] = True
 
-    # 💤 controle de taxa real
     time.sleep(SLEEP_TIME)
     return item
 
-
-def enrich(items):
-    # ⚡ mantém ordem original
+def enrich_all(data):
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        return list(executor.map(enrich_one, items))
+        return list(executor.map(enrich_one, data))
 
+# ==================================================
+# MAIN
+# ==================================================
 
 if __name__ == "__main__":
-    with open("data/anilist_raw.json", encoding="utf-8") as f:
-        items = json.load(f)
+    INPUT = "anilist.json"
+    OUTPUT = "anilist_enriched.json"
 
-    items = enrich(items)
+    with open(INPUT, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    with open("data/anilist_enriched.json", "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    print(f"📦 Itens carregados: {len(data)}")
 
-    print("✅ TMDB enrichment concluído — até onde o TMDB permitiu")
+    enriched = enrich_all(data)
+
+    with open(OUTPUT, "w", encoding="utf-8") as f:
+        json.dump(enriched, f, ensure_ascii=False, indent=2)
+
+    found = sum(1 for i in enriched if i["tmdb"].get("id"))
+    print(f"✅ TMDB encontrados: {found}")
