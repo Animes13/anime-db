@@ -7,16 +7,9 @@ import time
 import unicodedata
 import requests
 import threading
+import subprocess
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor
-
-# ==================================================
-# PATHS (à prova de GitHub Actions)
-# ==================================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT = os.path.join(BASE_DIR, "..", "data", "anilist_raw.json")
-OUTPUT = os.path.join(BASE_DIR, "..", "data", "anilist_enriched.json")
 
 # ==================================================
 # CONFIG TMDB
@@ -37,7 +30,7 @@ if len(TOKENS) < 4:
 
 token_cycle = cycle(TOKENS)
 
-def headers():
+def make_headers():
     return {
         "Authorization": f"Bearer {next(token_cycle)}",
         "Content-Type": "application/json;charset=utf-8"
@@ -53,6 +46,7 @@ SLEEP_TIME = 0.12
 TMDB_EMPTY = {
     "id": None,
     "media_type": None,
+    "season": None,
     "poster": None,
     "backdrop": None,
     "overview": None,
@@ -66,8 +60,10 @@ TMDB_EMPTY = {
     "reason": None
 }
 
+DETAILS_CACHE = {}
+
 # ==================================================
-# PROGRESSO (THREAD SAFE)
+# PROGRESSO
 # ==================================================
 
 lock = threading.Lock()
@@ -80,7 +76,7 @@ def log_progress(total):
     eta = (total - done) / speed if speed else 0
 
     print(
-        f"[{done:5}/{total}] "
+        f"[ {done:5}/{total} ] "
         f"✅ {found} ❌ {not_found} "
         f"{speed:4.2f} it/s ETA {int(eta//60)}m",
         end="\r",
@@ -98,13 +94,14 @@ def clean(txt):
     return re.sub(r"\s+", " ", txt).strip()
 
 def get_titles(item):
-    titles = [
-        item.get("titles", {}).get("english"),
-        item.get("titles", {}).get("romaji"),
-        item.get("titles", {}).get("native"),
-        *item.get("synonyms", [])
+    return [
+        t for t in [
+            item.get("titles", {}).get("english"),
+            item.get("titles", {}).get("romaji"),
+            item.get("titles", {}).get("native"),
+            *item.get("synonyms", [])
+        ] if t
     ]
-    return [t for t in dict.fromkeys(titles) if t]
 
 # ==================================================
 # TMDB
@@ -113,19 +110,24 @@ def get_titles(item):
 def search(endpoint, query):
     r = requests.get(
         f"{TMDB_API}/search/{endpoint}",
-        headers=headers(),
+        headers=make_headers(),
         params={"query": query},
         timeout=10
     )
     return r.json().get("results", []) if r.status_code == 200 else []
 
-def fetch_details(tmdb):
+def fetch_details(media, tmdb_id):
+    key = f"{media}:{tmdb_id}"
+    if key in DETAILS_CACHE:
+        return DETAILS_CACHE[key]
+
     r = requests.get(
-        f"{TMDB_API}/{tmdb['media_type']}/{tmdb['id']}",
-        headers=headers(),
+        f"{TMDB_API}/{media}/{tmdb_id}",
+        headers=make_headers(),
         timeout=10
     )
-    return r.json() if r.status_code == 200 else {}
+    DETAILS_CACHE[key] = r.json() if r.status_code == 200 else {}
+    return DETAILS_CACHE[key]
 
 def classify(tmdb):
     if tmdb["media_type"] == "movie":
@@ -147,52 +149,53 @@ def classify(tmdb):
 def enrich_one(item, total):
     global done, found, not_found
 
-    if "tmdb" not in item:
+    if not isinstance(item.get("tmdb"), dict):
         item["tmdb"] = TMDB_EMPTY.copy()
+    else:
+        for k, v in TMDB_EMPTY.items():
+            item["tmdb"].setdefault(k, v)
 
-    if not item["tmdb"]["checked"]:
-        for title in get_titles(item):
-            query = clean(title)
+    tmdb = item["tmdb"]
 
-            for media in ("tv", "movie"):
-                for r in search(media, query):
-                    tmdb = {
-                        "id": r["id"],
-                        "media_type": media,
-                        "poster": r.get("poster_path"),
-                        "backdrop": r.get("backdrop_path"),
-                        "overview": r.get("overview"),
-                        "vote_average": r.get("vote_average"),
-                        "release_date": r.get("first_air_date") or r.get("release_date"),
-                        "checked": True,
-                        "reason": None
-                    }
+    if tmdb["checked"] and tmdb["id"]:
+        with lock:
+            done += 1
+            log_progress(total)
+        return item
 
-                    details = fetch_details(tmdb)
-                    tmdb["runtime"] = details.get("runtime")
-                    tmdb["episode_run_time"] = (
-                        details.get("episode_run_time") or [None]
-                    )[0]
-                    tmdb["number_of_episodes"] = details.get("number_of_episodes")
-                    tmdb["tipo_final"] = classify(tmdb)
+    match = None
 
-                    item["tmdb"] = tmdb
+    for title in get_titles(item):
+        q = clean(title)
 
-                    with lock:
-                        found += 1
-                    break
+        for r in search("tv", q):
+            match = {"id": r["id"], "media_type": "tv"}
+            break
+        if match:
+            break
 
-                if item["tmdb"]["id"]:
-                    break
+        for r in search("movie", q):
+            match = {"id": r["id"], "media_type": "movie"}
+            break
+        if match:
+            break
 
-            if item["tmdb"]["id"]:
-                break
-
-        if not item["tmdb"]["id"]:
-            item["tmdb"]["checked"] = True
-            item["tmdb"]["reason"] = "not_found"
-            with lock:
-                not_found += 1
+    if match:
+        details = fetch_details(match["media_type"], match["id"])
+        match.update({
+            "runtime": details.get("runtime"),
+            "episode_run_time": (details.get("episode_run_time") or [None])[0],
+            "number_of_episodes": details.get("number_of_episodes"),
+            "checked": True,
+            "reason": None
+        })
+        match["tipo_final"] = classify(match)
+        item["tmdb"] = match
+        found += 1
+    else:
+        tmdb["checked"] = True
+        tmdb["reason"] = "not_found_enrich"
+        not_found += 1
 
     with lock:
         done += 1
@@ -206,17 +209,20 @@ def enrich_one(item, total):
 # ==================================================
 
 if __name__ == "__main__":
+    INPUT = "data/anilist_raw.json"
+    OUTPUT = "data/anilist_enriched.json"
+
     with open(INPUT, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    total = len(data)
-    print(f"📦 Processando {total} animes")
+    print(f"📦 Processando {len(data)} animes")
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        data = list(ex.map(lambda i: enrich_one(i, total), data))
+    with ThreadPoolExecutor(MAX_WORKERS) as ex:
+        data = list(ex.map(lambda i: enrich_one(i, len(data)), data))
 
     print("\n💾 Salvando anilist_enriched.json")
     with open(OUTPUT, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-    print(f"✅ TMDB encontrados: {found}")
+    print("🔁 Executando segunda chance...")
+    subprocess.run(["python", "scripts/retry_tmdb_missing.py"], check=True)
