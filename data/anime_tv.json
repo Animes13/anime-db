@@ -56014,14 +56014,14 @@
     "year": 2010,
     "status": "FINISHED",
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {

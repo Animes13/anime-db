@@ -81525,7 +81525,7 @@
       "media_type": "movie",
       "runtime": null,
       "episode_run_time": null,
-      "number_of_episodes": 8,
+      "number_of_episodes": 11,
       "checked": true,
       "reason": "retry_success",
       "tipo_final": "TV_SHORT"
@@ -89660,11 +89660,11 @@
       "id": 924216,
       "media_type": "movie",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "retry_success",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -175839,14 +175839,14 @@
       "Dream-Colored Pastry Chef"
     ],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -285691,14 +285691,14 @@
       "Monster Musume no Iru Nichijou OVA"
     ],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -293606,14 +293606,14 @@
     },
     "synonyms": [],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -322829,14 +322829,14 @@
       "The King's Avatar (2018)"
     ],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -333241,14 +333241,14 @@
     },
     "synonyms": [],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -464036,14 +464036,14 @@
       "Nü Wushen de Canzhuo Spring Festival Special"
     ],
     "tmdb": {
-      "id": 279041,
+      "id": 120089,
       "media_type": "tv",
       "runtime": null,
-      "episode_run_time": null,
-      "number_of_episodes": 29,
+      "episode_run_time": 24,
+      "number_of_episodes": 50,
       "checked": true,
       "reason": "not_found_final",
-      "tipo_final": "TV_SHORT"
+      "tipo_final": "TV"
     }
   },
   {
@@ -613684,12 +613684,12 @@
     "tmdb": {
       "id": 1605009,
       "media_type": "movie",
-      "runtime": 0,
+      "runtime": 48,
       "episode_run_time": null,
       "number_of_episodes": null,
       "checked": true,
       "reason": "retry_success",
-      "tipo_final": "MUSIC"
+      "tipo_final": "MOVIE"
     }
   },
   {
