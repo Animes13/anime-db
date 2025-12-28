@@ -11,10 +11,6 @@ import subprocess
 from itertools import cycle
 from concurrent.futures import ThreadPoolExecutor
 
-# ==================================================
-# CONFIG TMDB
-# ==================================================
-
 TMDB_API = "https://api.themoviedb.org/3"
 
 TOKENS = [
@@ -23,7 +19,6 @@ TOKENS = [
     os.getenv("TMDB_TOKEN_3"),
     os.getenv("TMDB_TOKEN_4"),
 ]
-
 TOKENS = [t for t in TOKENS if t]
 if len(TOKENS) < 4:
     raise RuntimeError("❌ Configure 4 TMDB_TOKENs")
@@ -35,10 +30,6 @@ def make_headers():
         "Authorization": f"Bearer {next(token_cycle)}",
         "Content-Type": "application/json;charset=utf-8"
     }
-
-# ==================================================
-# CONFIG
-# ==================================================
 
 MAX_WORKERS = 4
 SLEEP_TIME = 0.12
@@ -62,10 +53,6 @@ TMDB_EMPTY = {
 
 DETAILS_CACHE = {}
 
-# ==================================================
-# PROGRESSO
-# ==================================================
-
 lock = threading.Lock()
 done = found = not_found = 0
 start = time.time()
@@ -74,18 +61,12 @@ def log_progress(total):
     elapsed = time.time() - start
     speed = done / elapsed if elapsed else 0
     eta = (total - done) / speed if speed else 0
-
     print(
-        f"[ {done:5}/{total} ] "
-        f"✅ {found} ❌ {not_found} "
+        f"[ {done:5}/{total} ] ✅ {found} ❌ {not_found} "
         f"{speed:4.2f} it/s ETA {int(eta//60)}m",
         end="\r",
         flush=True
     )
-
-# ==================================================
-# NORMALIZAÇÃO
-# ==================================================
 
 def clean(txt):
     txt = unicodedata.normalize("NFKD", txt.lower())
@@ -102,10 +83,6 @@ def get_titles(item):
             *item.get("synonyms", [])
         ] if t
     ]
-
-# ==================================================
-# TMDB
-# ==================================================
 
 def search(endpoint, query):
     r = requests.get(
@@ -132,32 +109,25 @@ def fetch_details(media, tmdb_id):
 def classify(tmdb):
     if tmdb["media_type"] == "movie":
         return "MUSIC" if (tmdb.get("runtime") or 0) < 15 else "MOVIE"
-
     if tmdb["media_type"] == "tv":
         if (tmdb.get("number_of_episodes") or 0) <= 6:
             return "OVA/ONA"
         if (tmdb.get("episode_run_time") or 0) < 10:
             return "TV_SHORT"
         return "TV"
-
     return "UNKNOWN"
-
-# ==================================================
-# ENRICH
-# ==================================================
 
 def enrich_one(item, total):
     global done, found, not_found
 
-    if not isinstance(item.get("tmdb"), dict):
-        item["tmdb"] = TMDB_EMPTY.copy()
-    else:
-        for k, v in TMDB_EMPTY.items():
-            item["tmdb"].setdefault(k, v)
+    item.setdefault("tmdb", {})
+    for k, v in TMDB_EMPTY.items():
+        item["tmdb"].setdefault(k, v)
 
     tmdb = item["tmdb"]
 
-    if tmdb["checked"] and tmdb["id"]:
+    # 🔥 só pula se estiver COMPLETO
+    if tmdb["checked"] and tmdb["id"] and tmdb.get("overview"):
         with lock:
             done += 1
             log_progress(total)
@@ -181,11 +151,17 @@ def enrich_one(item, total):
             break
 
     if match:
-        details = fetch_details(match["media_type"], match["id"])
+        d = fetch_details(match["media_type"], match["id"])
         match.update({
-            "runtime": details.get("runtime"),
-            "episode_run_time": (details.get("episode_run_time") or [None])[0],
-            "number_of_episodes": details.get("number_of_episodes"),
+            "season": None,
+            "poster": d.get("poster_path"),
+            "backdrop": d.get("backdrop_path"),
+            "overview": d.get("overview"),
+            "vote_average": d.get("vote_average"),
+            "release_date": d.get("first_air_date") or d.get("release_date"),
+            "runtime": d.get("runtime"),
+            "episode_run_time": (d.get("episode_run_time") or [None])[0],
+            "number_of_episodes": d.get("number_of_episodes"),
             "checked": True,
             "reason": None
         })
@@ -203,10 +179,6 @@ def enrich_one(item, total):
 
     time.sleep(SLEEP_TIME)
     return item
-
-# ==================================================
-# MAIN
-# ==================================================
 
 if __name__ == "__main__":
     INPUT = "data/anilist_raw.json"
