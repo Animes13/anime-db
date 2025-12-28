@@ -22,13 +22,18 @@ jobs:
       - name: Fetch AniList
         run: python scripts/fetch_anilist.py
 
-      - name: Enrich TMDB
+      - name: Enrich TMDB (primeira tentativa)
         env:
           TMDB_TOKEN_1: ${{ secrets.TMDB_TOKEN_1 }}
           TMDB_TOKEN_2: ${{ secrets.TMDB_TOKEN_2 }}
           TMDB_TOKEN_3: ${{ secrets.TMDB_TOKEN_3 }}
           TMDB_TOKEN_4: ${{ secrets.TMDB_TOKEN_4 }}
         run: python scripts/enrich_tmdb.py
+
+      - name: Retry TMDB missing (segunda chance)
+        env:
+          TMDB_TOKEN_1: ${{ secrets.TMDB_TOKEN_1 }}
+        run: python scripts/retry_tmdb_missing.py
 
       - name: Build DB
         run: python scripts/update_all.py
